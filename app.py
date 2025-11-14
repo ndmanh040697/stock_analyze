@@ -21,6 +21,47 @@ from indicators import money_flow_indicators
 from valuation import dcf_valuation, load_eps_payout
 from plotly.subplots import make_subplots
 
+#Seurity
+def check_password():
+    """Trả về True nếu pass đúng, False nếu sai (hoặc chưa nhập)."""
+
+    def password_entered():
+        """So sánh pass nhập với pass lưu trong secrets."""
+        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # xóa pass khỏi state cho an toàn
+        else:
+            st.session_state["password_correct"] = False
+
+    # Lần đầu vào app
+    if "password_correct" not in st.session_state:
+        st.text_input(
+            "Nhập mật khẩu để truy cập:",
+            type="password",
+            on_change=password_entered,
+            key="password",
+        )
+        return False
+
+    # Đã nhập nhưng sai
+    if not st.session_state["password_correct"]:
+        st.text_input(
+            "Sai mật khẩu, nhập lại:",
+            type="password",
+            on_change=password_entered,
+            key="password",
+        )
+        st.error("❌ Mật khẩu không đúng.")
+        return False
+
+    # Đúng rồi
+    return True
+
+
+# ⚠️ Chặn toàn bộ app nếu chưa qua cửa password
+if not check_password():
+    st.stop()
+
 
 # ============ UI ============
 st.set_page_config(page_title="Phân tích cổ phiếu đa khung", layout="wide")
