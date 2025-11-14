@@ -32,7 +32,7 @@ def load_eps_payout(symbol: str):
     Lấy EPS và payout ratio gần nhất từ vnstock.
     Trả về (eps, payout) với payout dạng 0–1. Có fallback khi thiếu dữ liệu.
     """
-    stock = Vnstock().stock(symbol=symbol, source="VCI")
+    stock = Vnstock().stock(symbol=symbol, source=["VCI", "TCBS", "SSI"] )
 
     eps_val = np.nan
     payout = np.nan

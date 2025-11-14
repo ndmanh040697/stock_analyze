@@ -9,6 +9,12 @@ try:
 except Exception:
     HAS_TF = False
 
+try:
+    from prophet import Prophet
+    HAS_PROPHET = True
+except Exception:
+    HAS_PROPHET = False
+
 def _prepare_dl_series(series: pd.Series, window=20):
     """Chuẩn hóa và tạo (X, y) cho DL; chỉ dùng train nên không leak tương lai."""
     arr = series.values.astype("float32")
@@ -143,26 +149,32 @@ def arima_forecast(series, steps=50, order=(1, 1, 1)):
     return yhat, conf.iloc[:, 0], conf.iloc[:, 1]
 
 
+
 def prophet_forecast(series, steps=50):
-    if not HAS_TF:
+    if not HAS_PROPHET:
         raise RuntimeError("Prophet chưa cài. Hãy chạy: pip install prophet")
 
     dfp = pd.DataFrame({"ds": pd.to_datetime(series.index), "y": series.values})
     dfp = dfp.dropna()
-
     if len(dfp) < 2:
         raise ValueError("Không đủ dữ liệu cho Prophet")
 
-    m = tf(daily_seasonality=False,
-                weekly_seasonality=True,
-                yearly_seasonality=True)
+    # 👇 Quan trọng: dùng Prophet, KHÔNG phải tf
+    m = Prophet(
+        daily_seasonality=False,
+        weekly_seasonality=True,
+        yearly_seasonality=True,
+    )
     m.fit(dfp)
+
     future = m.make_future_dataframe(periods=steps, freq="B")
     fcst = m.predict(future).set_index("ds")
+
     yhat = fcst["yhat"].iloc[-steps:]
     low  = fcst["yhat_lower"].iloc[-steps:]
     up   = fcst["yhat_upper"].iloc[-steps:]
     return yhat, low, up
+
 
 
 def future_index(last_time, steps=50):
