@@ -1,0 +1,8 @@
+streamlit
+vnstock
+pandas
+numpy
+plotly
+ta
+statsmodels
+prophet
