@@ -6,7 +6,7 @@ import ta
 from data_loader import load_stock
 from forecast import (
     arima_forecast, prophet_forecast, future_index,
-    backtest_and_metrics, HAS_TF, lstm_forecast, transformer_forecast
+    backtest_and_metrics, HAS_TF
 )
 from indicators import (
     macd_signals_full, rsi_signals,
@@ -34,7 +34,7 @@ with col2:
 with col3:
     model_pick = st.selectbox(
         "Mô hình dự báo",
-        ["ARIMA","Prophet","LSTM","Transformer","Moving Average (fallback)"],
+        ["ARIMA","Prophet","Moving Average (fallback)"],
         index=0,
     )
 
@@ -88,10 +88,6 @@ if st.session_state.get("analyzed", False):
                 yhat, low, up = prophet_forecast(series, steps)
             elif model_pick == "ARIMA":
                 yhat, low, up = arima_forecast(series, steps)
-            elif model_pick == "LSTM":
-                yhat, low, up = lstm_forecast(series, steps)
-            elif model_pick == "Transformer":
-                 yhat, low, up = transformer_forecast(series, steps)
             else:
                 fc_idx = future_index(series.index[-1], steps)
                 mean_val = series.tail(20).mean()
@@ -118,8 +114,6 @@ if st.session_state.get("analyzed", False):
             model_kind = (
                 "Prophet" if (model_pick=="Prophet" and HAS_TF) else
                 "ARIMA"   if model_pick=="ARIMA" else
-                "LSTM"    if model_pick=="LSTM" else
-                "Transformer" if model_pick=="Transformer" else
                 "MA"
             ),
             steps=20
