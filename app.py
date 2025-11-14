@@ -424,7 +424,6 @@ if st.session_state.get("analyzed", False):
          # để debug xem có số hay không
         n = st.slider("Số phiên gần nhất để phân tích MFI/RSI/giá", 20, 250, 100, 10)
         subset = df_mf.tail(n)
-        st.caption("10 dòng cuối cùng của MFI/OBV:")
         st.dataframe(subset)
         st.markdown("### 📈 Biểu đồ MFI(14), RSI(14) & Giá")
 
