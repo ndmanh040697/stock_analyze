@@ -21,6 +21,7 @@ from indicators import money_flow_indicators
 from valuation import dcf_valuation, load_eps_payout
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
+from datetime import datetime, time as dtime, timedelta
 
 #Seurity
 # def check_password():
@@ -582,20 +583,57 @@ if page == "📈 Phân tích cổ phiếu":
                 """)
 
 # ==== PAGE 2: Thị trường realtime ====
+def is_vn_trading_time():
+    """
+    Trả về True nếu đang trong giờ giao dịch HOSE/HNX:
+    - Thứ 2–6
+    - 09:00–11:30 và 13:00–15:00 (giờ VN, UTC+7)
+    """
+    # Lấy giờ VN từ UTC, không cần pytz
+    now_utc = datetime.utcnow()
+    now_vn = now_utc + timedelta(hours=7)
+
+    # 0 = Monday, 6 = Sunday
+    if now_vn.weekday() >= 5:  # Thứ 7, CN
+        return False
+
+    t = now_vn.time()
+    morning_start = dtime(9, 0)
+    morning_end   = dtime(11, 30)
+    afternoon_start = dtime(13, 0)
+    afternoon_end   = dtime(15, 0)
+
+    in_morning   = morning_start   <= t <= morning_end
+    in_afternoon = afternoon_start <= t <= afternoon_end
+
+    return in_morning or in_afternoon
 if page == "📊 Thị trường realtime":
-    refresh_sec = st.sidebar.slider(
-        "Chu kỳ làm mới bảng realtime (giây)",
-        min_value=5, max_value=60, value=60, step=5
-    )
-
-    # 🔁 Tự rerun theo chu kỳ (chỉ áp dụng cho page này)
-    st_autorefresh(interval=refresh_sec * 1000, key="market_refresh")
     st.title("📊 Thị trường realtime (VNIndex & Watchlist)")
+    trading_now = is_vn_trading_time()
 
+    if trading_now:
+        # Chỉ cho auto-refresh khi ĐANG trong giờ giao dịch
+        refresh_sec = st.sidebar.slider(
+            "Chu kỳ làm mới bảng realtime (giây)",
+            min_value=5, max_value=60, value=60, step=5
+        )
+
+        st_autorefresh(interval=refresh_sec * 1000, key="market_refresh")
+        st.sidebar.success(
+            f"⏱️ Đang trong giờ giao dịch HOSE/HNX – tự refresh mỗi {refresh_sec}s."
+        )
+    else:
+        st.sidebar.info(
+            "💤 Ngoài giờ giao dịch HOSE/HNX (09:00–11:30, 13:00–15:00, T2–T6). "
+            "Page này không auto-refresh."
+        )
+
+
+    
     # 1) VNIndex
     st.subheader("VNIndex (daily)")
     try:
-        df_vni = load_stock("VNINDEX", start="2024-01-01")
+        df_vni = load_stock("VNINDEX", start="2018-01-01")
         df_vni = df_vni.sort_values("time")
         st.line_chart(
             df_vni.set_index("time")["close"],
@@ -640,7 +678,7 @@ if page == "📊 Thị trường realtime":
     rows = []
     for sym in watchlist:
         try:
-            df_sym = load_stock(sym, start="2024-10-01")
+            df_sym = load_stock(sym, start="2018-01-01")
             df_sym = df_sym.sort_values("time")
             last = df_sym.iloc[-1]
             prev = df_sym.iloc[-2] if len(df_sym) > 1 else last
