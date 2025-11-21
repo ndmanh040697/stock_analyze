@@ -23,45 +23,45 @@ from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 
 #Seurity
-def check_password():
-    """Trả về True nếu pass đúng, False nếu sai (hoặc chưa nhập)."""
+# def check_password():
+#     """Trả về True nếu pass đúng, False nếu sai (hoặc chưa nhập)."""
 
-    def password_entered():
-        """So sánh pass nhập với pass lưu trong secrets."""
-        if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # xóa pass khỏi state cho an toàn
-        else:
-            st.session_state["password_correct"] = False
+#     def password_entered():
+#         """So sánh pass nhập với pass lưu trong secrets."""
+#         if st.session_state["password"] == st.secrets["APP_PASSWORD"]:
+#             st.session_state["password_correct"] = True
+#             del st.session_state["password"]  # xóa pass khỏi state cho an toàn
+#         else:
+#             st.session_state["password_correct"] = False
 
-    # Lần đầu vào app
-    if "password_correct" not in st.session_state:
-        st.text_input(
-            "Nhập mật khẩu để truy cập:",
-            type="password",
-            on_change=password_entered,
-            key="password",
-        )
-        return False
+#     # Lần đầu vào app
+#     if "password_correct" not in st.session_state:
+#         st.text_input(
+#             "Nhập mật khẩu để truy cập:",
+#             type="password",
+#             on_change=password_entered,
+#             key="password",
+#         )
+#         return False
 
-    # Đã nhập nhưng sai
-    if not st.session_state["password_correct"]:
-        st.text_input(
-            "Sai mật khẩu, nhập lại:",
-            type="password",
-            on_change=password_entered,
-            key="password",
-        )
-        st.error("❌ Mật khẩu không đúng.")
-        return False
+#     # Đã nhập nhưng sai
+#     if not st.session_state["password_correct"]:
+#         st.text_input(
+#             "Sai mật khẩu, nhập lại:",
+#             type="password",
+#             on_change=password_entered,
+#             key="password",
+#         )
+#         st.error("❌ Mật khẩu không đúng.")
+#         return False
 
-    # Đúng rồi
-    return True
+#     # Đúng rồi
+#     return True
 
 
-# ⚠️ Chặn toàn bộ app nếu chưa qua cửa password
-if not check_password():
-    st.stop()
+# # ⚠️ Chặn toàn bộ app nếu chưa qua cửa password
+# if not check_password():
+#     st.stop()
 
 
 # ============ UI ============
@@ -430,28 +430,28 @@ if page == "📈 Phân tích cổ phiếu":
             else:
                 st.info("Chưa có đủ tín hiệu để tạo giao dịch cho chiến lược này.")
 
-            patterns = detect_candlestick_patterns(df_sig)
-            st.markdown("### Mô hình nến gần đây")
-            st.dataframe(patterns.tail(30))      
-            show_pattern = st.selectbox(
-                "Hiển thị mô hình nến:",
-                ["None","Doji","Hammer","Shooting star","Bullish Engulfing","Bearish Engulfing"]
-            )
+            # patterns = detect_candlestick_patterns(df_sig)
+            # st.markdown("### Mô hình nến gần đây")
+            # st.dataframe(patterns.tail(30))      
+            # show_pattern = st.selectbox(
+            #     "Hiển thị mô hình nến:",
+            #     ["None","Doji","Hammer","Shooting star","Bullish Engulfing","Bearish Engulfing"]
+            # )
 
-            mask = None
-            if show_pattern == "Doji":
-                mask = patterns["doji"]
-            elif show_pattern == "Hammer":
-                mask = patterns["hammer"]
-            ...
+            # mask = None
+            # if show_pattern == "Doji":
+            #     mask = patterns["doji"]
+            # elif show_pattern == "Hammer":
+            #     mask = patterns["hammer"]
+            # ...
 
-            if mask is not None:
-                pts = df_sig[mask]
-                fig_sig.add_trace(go.Scatter(
-                    x=pts["time"], y=pts["close"],
-                    mode="markers", name=show_pattern,
-                    marker=dict(symbol="x", size=12, color="orange")
-                ))
+            # if mask is not None:
+            #     pts = df_sig[mask]
+            #     fig_sig.add_trace(go.Scatter(
+            #         x=pts["time"], y=pts["close"],
+            #         mode="markers", name=show_pattern,
+            #         marker=dict(symbol="x", size=12, color="orange")
+            #     ))
             mfi, obv = money_flow_indicators(df_sig)
             rsi_14 = ta.momentum.rsi(df_sig["close"], window=14)
             df_mf = pd.DataFrame({
@@ -461,10 +461,14 @@ if page == "📈 Phân tích cổ phiếu":
                 "RSI(14)": rsi_14,
                 "OBV": obv
             }).set_index("time")
+            df_nf = pd.DataFrame({
+                "time": df_sig["time"],
+                "OBV": obv
+            }).set_index("time")
 
 
             st.markdown("### 🔄 Phân tích dòng tiền (MFI / OBV)")
-            st.line_chart(df_mf.tail(200))
+            st.line_chart(df_nf.tail(200))
             st.caption("- MFI > 80: vùng quá mua, < 20: quá bán\n"
                     "- RSI > 70: vùng quá mua, < 30: quá bán\n"
                     "- OBV tăng cùng giá → dòng tiền ủng hộ xu hướng; OBV đi ngược giá → cảnh báo phân kỳ.")
@@ -581,7 +585,7 @@ if page == "📈 Phân tích cổ phiếu":
 if page == "📊 Thị trường realtime":
     refresh_sec = st.sidebar.slider(
         "Chu kỳ làm mới bảng realtime (giây)",
-        min_value=5, max_value=60, value=10, step=5
+        min_value=5, max_value=60, value=60, step=5
     )
 
     # 🔁 Tự rerun theo chu kỳ (chỉ áp dụng cho page này)
