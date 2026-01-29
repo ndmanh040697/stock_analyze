@@ -22,6 +22,8 @@ from valuation import dcf_valuation, load_eps_payout
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, time as dtime, timedelta
+from vnstock import Trading, Listing
+
 
 #Seurity
 # def check_password():
@@ -64,12 +66,230 @@ from datetime import datetime, time as dtime, timedelta
 # if not check_password():
 #     st.stop()
 
+# ================== FOREIGN FLOW HELPERS ==================
+@st.cache_data(show_spinner=False)
+def load_foreign_raw(start_date, end_date, source="vci"):
+    trading = Trading(source=source)
+
+    try:
+        df = trading.foreign_trade(
+            start=start_date.strftime("%Y-%m-%d"),
+            end=end_date.strftime("%Y-%m-%d"),
+        )
+        return df
+    except NotImplementedError:
+        # Gói lại lỗi cho dễ hiểu
+        raise RuntimeError(
+            "foreign_trade() chưa được hỗ trợ trong phiên bản thư viện hiện tại "
+            "(vnstock free). Muốn dùng tính năng dòng tiền khối ngoại phải cài vnstock_data bản mới."
+        )
+
+
+def is_vn_trading_time():
+    """
+    Trả về True nếu đang trong giờ giao dịch HOSE/HNX:
+    - Thứ 2–6
+    - 09:00–11:30 và 13:00–15:00 (giờ VN, UTC+7)
+    """
+    # Lấy giờ VN từ UTC, không cần pytz
+    now_utc = datetime.utcnow()
+    now_vn = now_utc + timedelta(hours=7)
+
+    # 0 = Monday, 6 = Sunday
+    if now_vn.weekday() >= 5:  # Thứ 7, CN
+        return False
+
+    t = now_vn.time()
+    morning_start = dtime(9, 0)
+    morning_end   = dtime(11, 30)
+    afternoon_start = dtime(13, 0)
+    afternoon_end   = dtime(15, 0)
+
+    in_morning   = morning_start   <= t <= morning_end
+    in_afternoon = afternoon_start <= t <= afternoon_end
+
+    return in_morning or in_afternoon
+
+
+def normalize_foreign_df(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Chuẩn hóa output foreign_trade() thành các cột chuẩn:
+    time, symbol, foreign_buy_val, foreign_sell_val, foreign_net_val, total_traded_val
+    Dựa trên các tên cột hay gặp như:
+    - tradingdate
+    - foreignbuyvaltotal, foreignsellvaltotal
+    - netforeignval
+    - totaltradedvalue
+    """
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame()
+
+    df = df_raw.copy()
+    cols = list(df.columns)
+
+    # ===== tìm cột ngày =====
+    date_col = None
+    for key in ["tradingdate", "date", "time", "ngay"]:
+        for c in cols:
+            if key in c.lower():
+                date_col = c
+                break
+        if date_col:
+            break
+    if date_col is None:
+        st.error(f"Không tìm được cột ngày trong foreign_trade(). Columns: {cols}")
+        return pd.DataFrame()
+
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(date_col)
+
+    # ===== tìm cột mã =====
+    symbol_col = None
+    for c in cols:
+        lc = c.lower()
+        if lc == "symbol" or "code" in lc or lc == "ticker":
+            symbol_col = c
+            break
+
+    # ===== helper tìm cột theo keyword =====
+    def find_col(*keywords):
+        for c in cols:
+            lc = c.lower()
+            if all(k in lc for k in keywords):
+                return c
+        return None
+
+    buy_col = (
+        find_col("foreign", "buy", "val")
+        or find_col("buy", "value", "foreign")
+        or find_col("frgn", "buy", "val")
+    )
+    sell_col = (
+        find_col("foreign", "sell", "val")
+        or find_col("sell", "value", "foreign")
+        or find_col("frgn", "sell", "val")
+    )
+    net_col = (
+        find_col("net", "foreign", "val")
+        or find_col("netforeignval")
+    )
+    total_val_col = (
+        find_col("totaltraded", "value")
+        or find_col("total", "traded", "value")
+    )
+
+    if buy_col is None or sell_col is None:
+        st.error(
+            "Không tìm được cột giá trị MUA/BÁN khối ngoại trong foreign_trade(). "
+            f"Columns: {cols}"
+        )
+        st.write("Debug foreign_trade raw:", df_raw.head())
+        return pd.DataFrame()
+
+    df["foreign_buy_val"] = pd.to_numeric(df[buy_col], errors="coerce")
+    df["foreign_sell_val"] = pd.to_numeric(df[sell_col], errors="coerce")
+
+    if net_col is not None:
+        df["foreign_net_val"] = pd.to_numeric(df[net_col], errors="coerce")
+    else:
+        df["foreign_net_val"] = df["foreign_buy_val"] - df["foreign_sell_val"]
+
+    if total_val_col is not None:
+        df["total_traded_val"] = pd.to_numeric(df[total_val_col], errors="coerce")
+    else:
+        df["total_traded_val"] = np.nan  # không có GTGD thì tỷ trọng sẽ = NaN
+
+    df = df.rename(columns={date_col: "time"})
+    if symbol_col:
+        df = df.rename(columns={symbol_col: "symbol"})
+    else:
+        df["symbol"] = "MARKET"
+
+    return df[["time", "symbol", "foreign_buy_val", "foreign_sell_val",
+               "foreign_net_val", "total_traded_val"]]
+
+@st.cache_data(ttl=30)  # cache 30s cho đỡ gọi API liên tục
+def load_board_by_exchange(exchange: str = "HOSE"):
+    """
+    Lấy bảng giá realtime cho toàn bộ cổ phiếu trên 1 sàn (HOSE/HNX/UPCOM)
+    dùng Listing + Trading.price_board của vnstock.
+    """
+    # 1) Lấy danh sách mã theo sàn
+    listing = Listing(source="VCI")
+    df_sym = listing.symbols_by_exchange()
+    df_sym = df_sym[(df_sym["exchange"] == exchange) & (df_sym["type"] == "STOCK")]
+
+    symbols_list = df_sym["symbol"].dropna().unique().tolist()
+    if not symbols_list:
+        return pd.DataFrame()
+
+    # 2) Gọi price_board cho list mã đó
+    t = Trading(symbol="VN30F1M")  # symbol bất kỳ, chỉ để khởi tạo
+    board = t.price_board(symbols_list=symbols_list)
+
+    # 3) Flatten multi-index columns: (listing, symbol) -> listing_symbol
+    board = board.copy()
+    board.columns = [f"{c[0]}_{c[1]}" for c in board.columns]
+
+    return board
+
+
+def build_tran_san_table(board: pd.DataFrame) -> pd.DataFrame:
+    """Từ DataFrame price_board đã flatten, tính trạng thái TRẦN / SÀN."""
+    if board.empty:
+        return board
+
+    df = board.copy()
+
+    # Các cột quan trọng
+    sym   = df.get("listing_symbol")
+    exch  = df.get("listing_exchange")
+    ceil_ = df.get("listing_ceiling")
+    floor_ = df.get("listing_floor")
+    ref = df.get("listing_ref_price", df.get("listing_prior_close_price"))
+    price = df.get("match_match_price")
+    vol = df.get("match_match_vol", df.get("match_accumulated_volume"))
+
+    # Nếu thiếu cột bắt buộc thì trả về rỗng
+    needed = [sym, exch, ceil_, floor_, price]
+    if any(x is None for x in needed):
+        return pd.DataFrame()
+
+    # Trạng thái TRẦN / SÀN
+    state = np.where(
+        price >= ceil_,
+        "TRẦN",
+        np.where(price <= floor_, "SÀN", "KHÁC")
+    )
+
+    pct = None
+    if ref is not None:
+        pct = np.where(ref > 0, (price - ref) / ref * 100, np.nan)
+
+    out = pd.DataFrame({
+        "Mã": sym,
+        "Sàn": exch,
+        "Giá trần": ceil_,
+        "Giá sàn": floor_,
+        "Giá khớp": price,
+        "Khối lượng khớp": vol,
+        "Trạng thái": state,
+    })
+
+    if pct is not None:
+        out["% so với tham chiếu"] = pct
+
+    # Lọc bỏ mã KHÁC, chỉ giữ TRẦN / SÀN
+    out = out[out["Trạng thái"].isin(["TRẦN", "SÀN"])]
+    out = out.sort_values("Mã")
+
+    return out
 
 # ============ UI ============
 st.set_page_config(page_title="Phân tích cổ phiếu đa khung", layout="wide")
 page = st.sidebar.radio(
     "Chọn trang",
-    ["📈 Phân tích cổ phiếu", "📊 Thị trường realtime"]
+    ["📈 Phân tích cổ phiếu", "📊 Thị trường realtime", "🌍 Dòng tiền khối ngoại"]
 )
 if page == "📈 Phân tích cổ phiếu":
     st.title("📈 Phân tích cổ phiếu đa khung thời gian")
@@ -583,31 +803,9 @@ if page == "📈 Phân tích cổ phiếu":
                 """)
 
 # ==== PAGE 2: Thị trường realtime ====
-def is_vn_trading_time():
-    """
-    Trả về True nếu đang trong giờ giao dịch HOSE/HNX:
-    - Thứ 2–6
-    - 09:00–11:30 và 13:00–15:00 (giờ VN, UTC+7)
-    """
-    # Lấy giờ VN từ UTC, không cần pytz
-    now_utc = datetime.utcnow()
-    now_vn = now_utc + timedelta(hours=7)
 
-    # 0 = Monday, 6 = Sunday
-    if now_vn.weekday() >= 5:  # Thứ 7, CN
-        return False
 
-    t = now_vn.time()
-    morning_start = dtime(9, 0)
-    morning_end   = dtime(11, 30)
-    afternoon_start = dtime(13, 0)
-    afternoon_end   = dtime(15, 0)
-
-    in_morning   = morning_start   <= t <= morning_end
-    in_afternoon = afternoon_start <= t <= afternoon_end
-
-    return in_morning or in_afternoon
-if page == "📊 Thị trường realtime":
+elif page == "📊 Thị trường realtime":
     st.title("📊 Thị trường realtime (VNIndex & Watchlist)")
     trading_now = is_vn_trading_time()
 
@@ -664,6 +862,59 @@ if page == "📊 Thị trường realtime":
         st.error(f"Không lấy được dữ liệu VNINDEX: {e}")
 
     st.markdown("---")
+    st.subheader("📌 Lọc cổ phiếu TRẦN / SÀN toàn sàn")
+
+    col_ex1, col_ex2 = st.columns([1, 2])
+    with col_ex1:
+        ex_choice = st.selectbox(
+            "Chọn sàn để scan",
+            ["HOSE", "HNX", "UPCOM"],
+            index=0
+        )
+    with col_ex2:
+        st.caption("Dữ liệu lấy từ vnstock.Trading.price_board()")
+
+    # Gọi API lấy bảng giá cho cả sàn
+    board = load_board_by_exchange(ex_choice)
+
+    if board.empty:
+        st.info("Không lấy được dữ liệu bảng giá cho sàn đã chọn.")
+    else:
+        df_tran_san = build_tran_san_table(board)
+
+        if df_tran_san.empty:
+            st.info("Hiện tại không có mã nào TRẦN / SÀN trên sàn đã chọn.")
+        else:
+            # Hàm tô màu
+            def color_row(row):
+                if row["Trạng thái"] == "TRẦN":
+                    color = "#E9D5FF"  # tím nhạt
+                elif row["Trạng thái"] == "SÀN":
+                    color = "#BFDBFE"  # xanh dương nhạt
+                else:
+                    return [""] * len(row)
+                return [f"background-color: {color};"] * len(row)
+
+            format_dict = {
+                "Giá trần": "{:,.0f}",
+                "Giá sàn": "{:,.0f}",
+                "Giá khớp": "{:,.0f}",
+                "Khối lượng khớp": "{:,.0f}",
+            }
+            if "% so với tham chiếu" in df_tran_san.columns:
+                format_dict["% so với tham chiếu"] = "{:+.2f}%"
+
+            styler_scan = (
+                df_tran_san
+                .style
+                .apply(color_row, axis=1)
+                .format(format_dict)
+            )
+
+            st.dataframe(styler_scan, use_container_width=True)
+
+
+    
 
     # 2) Bảng watchlist
     st.subheader("Watchlist cổ phiếu")
@@ -750,7 +1001,202 @@ if page == "📊 Thị trường realtime":
         st.dataframe(styler, use_container_width=True)
     else:
         st.info("Nhập ít nhất 1 mã để theo dõi.")
+elif page == "🌍 Dòng tiền khối ngoại":
+    st.title("🌍 Dòng tiền khối ngoại – mua / bán, top gom & xả, tỷ trọng giao dịch")
 
+    # ==== Bộ filter cơ bản ====
+    col1, col2, col3 = st.columns([1.2, 1, 1])
+    with col1:
+        range_pick = st.selectbox(
+            "Khoảng thời gian",
+            ["3M", "6M", "1Y", "3Y"],
+            index=1
+        )
+    with col2:
+        agg_level = st.radio(
+            "Đơn vị thời gian",
+            ["Ngày", "Tuần", "Tháng"],
+            index=0,
+            horizontal=True
+        )
+    with col3:
+        top_n = st.slider("Top cổ phiếu mua ròng / bán ròng", 5, 30, 10, 1)
 
+    today = datetime.today().date()
+    if range_pick == "3M":
+        start_date = today - timedelta(days=90)
+    elif range_pick == "6M":
+        start_date = today - timedelta(days=180)
+    elif range_pick == "1Y":
+        start_date = today - timedelta(days=365)
+    else:  # 3Y
+        start_date = today - timedelta(days=365 * 3)
 
-                        
+    st.caption(
+        f"Khoảng dữ liệu: từ **{start_date}** đến **{today}** "
+        f"– đơn vị hiển thị: **{agg_level.lower()}**."
+    )
+
+    if st.button("🔄 Tải dữ liệu dòng tiền khối ngoại"):
+        with st.spinner("Đang tải dữ liệu khối ngoại từ vnstock..."):
+            try:
+                df_raw = load_foreign_raw(start_date, today)
+            except RuntimeError as e:
+                st.error(str(e))
+                st.info("Bạn vẫn dùng được 2 trang: 📈 Phân tích cổ phiếu & 📊 Thị trường realtime. "
+                        "Trang dòng tiền khối ngoại sẽ hoạt động khi bạn nâng cấp thư viện dữ liệu.")
+                st.stop()
+            if df_raw is None or df_raw.empty:
+                st.warning("Không có dữ liệu khối ngoại trong khoảng thời gian này.")
+                st.stop()
+
+            df_foreign = normalize_foreign_df(df_raw)
+
+        if df_foreign.empty:
+            st.warning("Không chuẩn hóa được dữ liệu foreign_trade(). Xem debug ở trên.")
+            st.stop()
+
+        # Lọc đúng range (phòng trường hợp API trả dài hơn)
+        mask = (df_foreign["time"].dt.date >= start_date) & (df_foreign["time"].dt.date <= today)
+        df_foreign = df_foreign.loc[mask].reset_index(drop=True)
+
+        # ==== Tổng hợp theo mốc thời gian (D/W/M) ====
+        df_f = df_foreign.set_index("time").sort_index()
+
+        rule = {"Ngày": "D", "Tuần": "W", "Tháng": "M"}[agg_level]
+        df_period = df_f.resample(rule).agg(
+            foreign_buy_val=("foreign_buy_val", "sum"),
+            foreign_sell_val=("foreign_sell_val", "sum"),
+            foreign_net_val=("foreign_net_val", "sum"),
+            total_traded_val=("total_traded_val", "sum")
+        )
+
+        df_period["foreign_turnover"] = (
+            df_period["foreign_buy_val"].abs() + df_period["foreign_sell_val"].abs()
+        )
+
+        # Tỷ trọng giao dịch khối ngoại / tổng GTGD
+        # Nếu total_traded_val không có (NaN), ratio cũng sẽ là NaN
+        df_period["foreign_share_pct"] = np.where(
+            df_period["total_traded_val"].abs() > 0,
+            df_period["foreign_turnover"] / df_period["total_traded_val"] * 100,
+            np.nan
+        )
+
+        df_period = df_period.dropna(how="all")
+
+        st.markdown("### 📉 Biểu đồ dòng tiền khối ngoại & tỷ trọng giao dịch")
+
+        fig_flow = make_subplots(specs=[[{"secondary_y": True}]])
+        x = df_period.index
+
+        # Net value (bar)
+        fig_flow.add_trace(
+            go.Bar(
+                x=x,
+                y=df_period["foreign_net_val"],
+                name="Net value khối ngoại (VND)",
+            ),
+            secondary_y=False,
+        )
+
+        # Tỷ trọng (%) (line)
+        fig_flow.add_trace(
+            go.Scatter(
+                x=x,
+                y=df_period["foreign_share_pct"],
+                name="Tỷ trọng GTGD khối ngoại (%)",
+                mode="lines+markers",
+            ),
+            secondary_y=True,
+        )
+
+        fig_flow.update_yaxes(
+            title_text="Net value khối ngoại (VND)",
+            secondary_y=False,
+        )
+        fig_flow.update_yaxes(
+            title_text="Tỷ trọng giao dịch (%)",
+            secondary_y=True,
+        )
+        fig_flow.update_layout(
+            height=500,
+            legend=dict(orientation="h"),
+            title=f"Dòng tiền khối ngoại – {agg_level.lower()} (net & tỷ trọng)",
+        )
+
+        st.plotly_chart(fig_flow, use_container_width=True)
+
+        st.caption(
+            "- Cột: Net value khối ngoại (mua - bán). Dương = mua ròng, âm = bán ròng.\n"
+            "- Đường: tỷ trọng GTGD khối ngoại / tổng GTGD thị trường cùng mốc thời gian."
+        )
+
+        # ==== Top cổ phiếu mua ròng / bán ròng trong toàn khoảng lọc ====
+        st.markdown("### 🏆 Top cổ phiếu khối ngoại **gom mạnh** / **xả mạnh**")
+
+        by_sym = (
+            df_foreign.groupby("symbol")
+            .agg(
+                foreign_buy_val=("foreign_buy_val", "sum"),
+                foreign_sell_val=("foreign_sell_val", "sum"),
+                foreign_net_val=("foreign_net_val", "sum"),
+            )
+            .sort_values("foreign_net_val", ascending=False)
+        )
+
+        top_buy = by_sym.head(top_n).copy()
+        top_sell = by_sym.tail(top_n).sort_values("foreign_net_val").copy()
+
+        colb1, colb2 = st.columns(2)
+        with colb1:
+            st.markdown(f"#### 🟢 Top {top_n} mua ròng")
+            st.dataframe(
+                top_buy.style.format(
+                    {
+                        "foreign_buy_val": "{:,.0f}",
+                        "foreign_sell_val": "{:,.0f}",
+                        "foreign_net_val": "{:,.0f}",
+                    }
+                )
+            )
+        with colb2:
+            st.markdown(f"#### 🔻 Top {top_n} bán ròng")
+            st.dataframe(
+                top_sell.style.format(
+                    {
+                        "foreign_buy_val": "{:,.0f}",
+                        "foreign_sell_val": "{:,.0f}",
+                        "foreign_net_val": "{:,.0f}",
+                    }
+                )
+            )
+
+        # ==== Bảng chi tiết theo mốc thời gian ====
+        st.markdown("### 📊 Bảng chi tiết theo mốc thời gian đã chọn")
+        st.dataframe(
+            df_period[[
+                "foreign_buy_val",
+                "foreign_sell_val",
+                "foreign_net_val",
+                "foreign_turnover",
+                "total_traded_val",
+                "foreign_share_pct",
+            ]].tail(50).style.format(
+                {
+                    "foreign_buy_val": "{:,.0f}",
+                    "foreign_sell_val": "{:,.0f}",
+                    "foreign_net_val": "{:,.0f}",
+                    "foreign_turnover": "{:,.0f}",
+                    "total_traded_val": "{:,.0f}",
+                    "foreign_share_pct": "{:,.2f}%",
+                }
+            ),
+            use_container_width=True
+        )
+
+        st.caption(
+            "Nếu cột `total_traded_val` trong bảng toàn là NaN thì version vnstock hiện tại "
+            "chưa cung cấp GTGD thị trường trong foreign_trade(). Khi đó tỷ trọng giao dịch "
+            "khối ngoại sẽ không tính được – bạn có thể kết hợp thêm `trading_stats()` để bổ sung."
+        )
