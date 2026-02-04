@@ -24,7 +24,7 @@ from valuation import dcf_valuation, load_eps_payout
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, time as dtime, timedelta
-from vnstock import Trading, Listing\
+from vnstock import Trading, Listing
 
 
 
@@ -69,16 +69,30 @@ from vnstock import Trading, Listing\
 # if not check_password():
 #     st.stop()
 @st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_all_symbols():
     """
-    Lấy toàn bộ mã cổ phiếu (stock) trên HOSE/HNX/UPCOM từ Listing.
-    Dùng cho dropdown chọn mã, tránh gõ sai.
+    Lấy toàn bộ mã cổ phiếu (stock) từ Listing.
+    Nếu API lỗi (tenacity.RetryError, timeout, v.v.)
+    thì fallback sang list tĩnh để app vẫn chạy được trên Streamlit Cloud.
     """
-    listing = Listing(source="VCI")
-    df_sym = listing.symbols_by_exchange()
-    df_sym = df_sym[df_sym["type"] == "STOCK"]
-    symbols = sorted(df_sym["symbol"].dropna().unique().tolist())
-    return symbols
+    for src in ["TCBS", "VCI"]:
+        try:
+            listing = Listing(source=src)
+            df_sym = listing.symbols_by_exchange()
+            df_sym = df_sym[df_sym["type"] == "STOCK"]
+            symbols = sorted(df_sym["symbol"].dropna().unique().tolist())
+            if symbols:
+                return symbols
+        except Exception as e:
+            # log ra console để debug, nhưng không cho app sập
+            print(f"[load_all_symbols] source={src} failed: {e}")
+            continue
+
+    # Fallback cuối cùng nếu mọi source đều lỗi:
+    print("[load_all_symbols] All sources failed, using static symbol list.")
+    return ["HPG", "SSI", "VCB", "VNM", "FPT", "VHM", "VND"]
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_last_price(symbol: str) -> float:
@@ -236,19 +250,25 @@ def normalize_foreign_df(df_raw: pd.DataFrame) -> pd.DataFrame:
                "foreign_net_val", "total_traded_val"]]
 
 @st.cache_data(ttl=30)  # cache 30s cho đỡ gọi API liên tục
+@st.cache_data(ttl=30)
 def load_board_by_exchange(exchange: str = "HOSE"):
-    """
-    Lấy bảng giá realtime cho toàn bộ cổ phiếu trên 1 sàn (HOSE/HNX/UPCOM)
-    dùng Listing + Trading.price_board của vnstock.
-    """
-    # 1) Lấy danh sách mã theo sàn
-    listing = Listing(source="VCI")
-    df_sym = listing.symbols_by_exchange()
-    df_sym = df_sym[(df_sym["exchange"] == exchange) & (df_sym["type"] == "STOCK")]
+    try:
+        listing = Listing(source="VCI")
+        df_sym = listing.symbols_by_exchange()
+        df_sym = df_sym[(df_sym["exchange"] == exchange) & (df_sym["type"] == "STOCK")]
+        symbols_list = df_sym["symbol"].dropna().unique().tolist()
+        if not symbols_list:
+            return pd.DataFrame()
 
-    symbols_list = df_sym["symbol"].dropna().unique().tolist()
-    if not symbols_list:
+        t = Trading(symbol="VN30F1M")
+        board = t.price_board(symbols_list=symbols_list)
+        board = board.copy()
+        board.columns = [f"{c[0]}_{c[1]}" for c in board.columns]
+        return board
+    except Exception as e:
+        print(f"[load_board_by_exchange] failed: {e}")
         return pd.DataFrame()
+
 
     # 2) Gọi price_board cho list mã đó
     t = Trading(symbol="VN30F1M")  # symbol bất kỳ, chỉ để khởi tạo
@@ -274,27 +294,25 @@ def save_portfolios(data: dict):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 @st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)
 def get_realtime_prices(symbols):
-    """
-    Lấy giá realtime từ bảng giá (price_board) cho list symbol.
-    TTL=3600s => mỗi 1h gọi lại API 1 lần.
-    """
     if not symbols:
         return {}
+    try:
+        t = Trading(source="VCI")
+        board = t.price_board(symbols_list=symbols)
+        board = board.copy()
+        board.columns = [f"{c[0]}_{c[1]}" for c in board.columns]
 
-    t = Trading(source="VCI")
-    board = t.price_board(symbols_list=symbols)
-    board = board.copy()
-    # flatten multi-index: ('match','match_price') -> 'match_match_price'
-    board.columns = [f"{c[0]}_{c[1]}" for c in board.columns]
-
-    sym_col = board.get("listing_symbol")
-    price_col = board.get("match_match_price")
-
-    if sym_col is None or price_col is None:
+        sym_col = board.get("listing_symbol")
+        price_col = board.get("match_match_price")
+        if sym_col is None or price_col is None:
+            return {}
+        return dict(zip(sym_col, price_col))
+    except Exception as e:
+        print(f"[get_realtime_prices] failed: {e}")
         return {}
 
-    return dict(zip(sym_col, price_col))
 
 
 
