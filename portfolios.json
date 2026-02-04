@@ -1,0 +1,71 @@
+{
+  "Danh mục của Thảo": [
+    {
+      "symbol": "HPG",
+      "qty": 262.0,
+      "buy_price": 29677.0
+    },
+    {
+      "symbol": "SSI",
+      "qty": 84.0,
+      "buy_price": 38250.0
+    },
+    {
+      "symbol": "VCB",
+      "qty": 45.0,
+      "buy_price": 65400.0
+    },
+    {
+      "symbol": "VHM",
+      "qty": 50.0,
+      "buy_price": 99000.0
+    }
+  ],
+  "Danh mục của Mạnh": [
+    {
+      "symbol": "HPG",
+      "qty": 713.0,
+      "buy_price": 24766.0
+    },
+    {
+      "symbol": "SSI",
+      "qty": 165.0,
+      "buy_price": 35716.0
+    },
+    {
+      "symbol": "CMC",
+      "qty": 24.0,
+      "buy_price": 5893.0
+    },
+    {
+      "symbol": "FPT",
+      "qty": 31.0,
+      "buy_price": 102492.0
+    },
+    {
+      "symbol": "HSG",
+      "qty": 200.0,
+      "buy_price": 20000.0
+    },
+    {
+      "symbol": "PVO",
+      "qty": 400.0,
+      "buy_price": 6605.0
+    },
+    {
+      "symbol": "VHM",
+      "qty": 19.0,
+      "buy_price": 99000.0
+    },
+    {
+      "symbol": "VND",
+      "qty": 123.0,
+      "buy_price": 26245.0
+    },
+    {
+      "symbol": "VNM",
+      "qty": 150.0,
+      "buy_price": 59193.0
+    }
+  ]
+}

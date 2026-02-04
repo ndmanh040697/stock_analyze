@@ -1,4 +1,6 @@
 # app.py
+import os
+import json
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -22,7 +24,8 @@ from valuation import dcf_valuation, load_eps_payout
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 from datetime import datetime, time as dtime, timedelta
-from vnstock import Trading, Listing
+from vnstock import Trading, Listing\
+
 
 
 #Seurity
@@ -65,6 +68,30 @@ from vnstock import Trading, Listing
 # # ⚠️ Chặn toàn bộ app nếu chưa qua cửa password
 # if not check_password():
 #     st.stop()
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_all_symbols():
+    """
+    Lấy toàn bộ mã cổ phiếu (stock) trên HOSE/HNX/UPCOM từ Listing.
+    Dùng cho dropdown chọn mã, tránh gõ sai.
+    """
+    listing = Listing(source="VCI")
+    df_sym = listing.symbols_by_exchange()
+    df_sym = df_sym[df_sym["type"] == "STOCK"]
+    symbols = sorted(df_sym["symbol"].dropna().unique().tolist())
+    return symbols
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_last_price(symbol: str) -> float:
+    """
+    Lấy giá close mới nhất của một mã, cache 1h.
+    Dùng để tính giá trị hiện tại danh mục.
+    """
+    try:
+        df = load_stock(symbol, start="2023-01-01", end=None, interval="1D")
+        df = df.sort_values("time")
+        return float(df["close"].iloc[-1])
+    except Exception:
+        return float("nan")
 
 # ================== FOREIGN FLOW HELPERS ==================
 @st.cache_data(show_spinner=False)
@@ -232,6 +259,50 @@ def load_board_by_exchange(exchange: str = "HOSE"):
     board.columns = [f"{c[0]}_{c[1]}" for c in board.columns]
 
     return board
+PORTFOLIO_FILE = "portfolios.json"
+
+def load_all_symbols():
+    """Lấy list tất cả mã cổ phiếu từ Listing (để validate mã)."""
+    listing = Listing(source="VCI")
+    df_sym = listing.symbols_by_exchange()
+    df_sym = df_sym[df_sym["type"] == "STOCK"]
+    return df_sym["symbol"].dropna().unique().tolist()
+
+def load_portfolios():
+    """Đọc file JSON lưu danh mục."""
+    if not os.path.exists(PORTFOLIO_FILE):
+        return {}
+    with open(PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_portfolios(data: dict):
+    """Ghi file JSON lưu danh mục."""
+    with open(PORTFOLIO_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+@st.cache_data(ttl=3600)
+def get_realtime_prices(symbols):
+    """
+    Lấy giá realtime từ bảng giá (price_board) cho list symbol.
+    TTL=3600s => mỗi 1h gọi lại API 1 lần.
+    """
+    if not symbols:
+        return {}
+
+    t = Trading(source="VCI")
+    board = t.price_board(symbols_list=symbols)
+    board = board.copy()
+    # flatten multi-index: ('match','match_price') -> 'match_match_price'
+    board.columns = [f"{c[0]}_{c[1]}" for c in board.columns]
+
+    sym_col = board.get("listing_symbol")
+    price_col = board.get("match_match_price")
+
+    if sym_col is None or price_col is None:
+        return {}
+
+    return dict(zip(sym_col, price_col))
+
 
 
 def build_tran_san_table(board: pd.DataFrame) -> pd.DataFrame:
@@ -289,8 +360,21 @@ def build_tran_san_table(board: pd.DataFrame) -> pd.DataFrame:
 st.set_page_config(page_title="Phân tích cổ phiếu đa khung", layout="wide")
 page = st.sidebar.radio(
     "Chọn trang",
-    ["📈 Phân tích cổ phiếu", "📊 Thị trường realtime", "🌍 Dòng tiền khối ngoại"]
+    ["📈 Phân tích cổ phiếu",
+     "📊 Thị trường realtime",
+     "💼 Danh mục đầu tư",
+     "🌍 Dòng tiền khối ngoại"]
 )
+if "loaded_portfolio_name" not in st.session_state:
+    st.session_state["loaded_portfolio_name"] = "(Tạo danh mục mới)"
+
+if "portfolios_store" not in st.session_state:
+    st.session_state["portfolios_store"] = load_portfolios()
+# Khởi tạo session_state cho danh mục đầu tư
+if "portfolios" not in st.session_state:
+    # portfolios: dict[ten_danh_muc] = list[{"symbol", "buy_price", "quantity"}]
+    st.session_state["portfolios"] = {}
+
 if page == "📈 Phân tích cổ phiếu":
     st.title("📈 Phân tích cổ phiếu đa khung thời gian")
 
@@ -919,7 +1003,7 @@ elif page == "📊 Thị trường realtime":
     # 2) Bảng watchlist
     st.subheader("Watchlist cổ phiếu")
 
-    default_list = "HPG, SSI, VCB, VNM, FPT, CMC, HSG, PVO, VND"
+    default_list = "HPG, SSI, VCB, VNM, FPT, CMC, HSG, PVO, VND, VHM"
     symbols_text = st.text_input(
         "Danh sách mã (phân cách bằng dấu phẩy):",
         value=default_list
@@ -1001,6 +1085,224 @@ elif page == "📊 Thị trường realtime":
         st.dataframe(styler, use_container_width=True)
     else:
         st.info("Nhập ít nhất 1 mã để theo dõi.")
+elif page == "💼 Danh mục đầu tư":
+    st.title("💼 Danh mục đầu tư")
+
+    all_symbols = load_all_symbols()
+    portfolios = st.session_state["portfolios_store"]
+    existing_names = sorted(portfolios.keys())
+
+
+    col_top1, col_top2 = st.columns([2, 1])
+    with col_top1:
+        selected_name = st.selectbox(
+            "Chọn danh mục đã lưu",
+            options=["(Tạo danh mục mới)"] + existing_names,
+            index=0
+        )
+    with col_top2:
+        new_name = st.text_input(
+            "Tên danh mục (vd: Mạnh, Thảo, ...)",
+            value="" if selected_name == "(Tạo danh mục mới)" else selected_name,
+        )
+
+    # --- Khởi tạo DataFrame danh mục trong session_state ---
+    # --- Khởi tạo DataFrame danh mục trong session_state ---
+    default_df = pd.DataFrame(
+        [{"symbol": "HPG", "qty": 0, "buy_price": ""}]
+    )
+    if "portfolio_df" not in st.session_state:
+        st.session_state["portfolio_df"] = default_df.copy()
+
+    # Chỉ reload từ file KHI BẠN ĐỔI danh mục trong selectbox
+    if selected_name != st.session_state["loaded_portfolio_name"]:
+        if selected_name != "(Tạo danh mục mới)" and selected_name in portfolios:
+            data = portfolios.get(selected_name, [])
+            st.session_state["portfolio_df"] = pd.DataFrame(data)
+        else:
+            # Tạo mới hoặc danh mục không có trong file → dùng df mặc định
+            st.session_state["portfolio_df"] = default_df.copy()
+
+        st.session_state["loaded_portfolio_name"] = selected_name
+
+
+    st.markdown("### 🧾 Danh sách mã trong danh mục")
+
+    # ⚠️ BẮT BUỘC: ép buy_price về dạng text để dùng TextColumn
+    df_for_editor = st.session_state["portfolio_df"].copy()
+
+    if "buy_price" not in df_for_editor.columns:
+        df_for_editor["buy_price"] = ""
+
+    def to_text_price(x):
+        # None / NaN -> chuỗi rỗng
+        if pd.isna(x):
+            return ""
+        # số -> giữ nguyên nhưng stringify, không thêm dấu phẩy
+        try:
+            f = float(x)
+            # nếu là số nguyên thì bỏ .0 cho đẹp
+            if f.is_integer():
+                return str(int(f))
+            return str(f)
+        except Exception:
+            # đã là string rồi thì trả lại
+            return str(x)
+
+    df_for_editor["buy_price"] = df_for_editor["buy_price"].apply(to_text_price).astype("object")
+
+    df_input = st.data_editor(
+        df_for_editor,
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "symbol": st.column_config.SelectboxColumn(
+                "Mã",
+                options=all_symbols,
+                help="Chọn mã hợp lệ từ sàn (HOSE/HNX/UPCOM).",
+            ),
+            "qty": st.column_config.NumberColumn(
+                "Số lượng", min_value=0, step=1,format="%d",
+            ),
+            "buy_price": st.column_config.TextColumn(
+                "Giá mua (VND)",
+                help="Có thể nhập 29677, 29,677 hoặc 29.677 đều được.",
+            ),
+        },
+        key="portfolio_editor",
+    )
+
+    # Lưu lại version đã edit (vẫn là text ở cột buy_price)
+    st.session_state["portfolio_df"] = df_input
+
+
+    # --- Tính toán giá trị & lãi/lỗ cho từng mã ---
+    df_port = df_input.copy()
+    df_port = df_port.dropna(subset=["symbol"])
+    if df_port.empty:
+        st.info("Hãy nhập ít nhất 1 mã trong danh mục.")
+        st.stop()
+
+    df_port["qty"] = pd.to_numeric(df_port["qty"], errors="coerce").fillna(0.0)
+    def parse_price(x):
+        """Nhận '29,677' / '29.677' / '29677' -> 29677.0"""
+        if pd.isna(x):
+            return 0.0
+        s = str(x).strip()
+        if s == "":
+            return 0.0
+        # bỏ dấu cách
+        s = s.replace(" ", "")
+        # bỏ dấu ngăn cách nghìn (cả . và ,)
+        s_clean = s.replace(".", "").replace(",", "")
+        try:
+            return float(s_clean)
+        except Exception:
+            return 0.0
+
+    df_port["buy_price"] = df_port["buy_price"].apply(parse_price)
+
+
+    symbols_in_port = df_port["symbol"].unique().tolist()
+    price_map = get_realtime_prices(symbols_in_port)
+
+    # Giá hiện tại lấy từ bảng giá realtime.
+    df_port["current_price"] = df_port["symbol"].map(price_map)
+
+    # Nếu API không trả về (ngoài giờ giao dịch / lỗi) -> fallback về giá mua
+    df_port["current_price"] = df_port["current_price"].fillna(df_port["buy_price"])
+
+    df_port["cost"] = df_port["qty"] * df_port["buy_price"]
+    df_port["value_now"] = df_port["qty"] * df_port["current_price"]
+    df_port["pnl"] = df_port["value_now"] - df_port["cost"]
+    df_port["pnl_pct"] = np.where(
+        df_port["cost"] > 0,
+        df_port["pnl"] / df_port["cost"] * 100,
+        np.nan,
+    )
+
+    total_cost = float(df_port["cost"].sum())
+    total_value = float(df_port["value_now"].sum())
+    total_pnl = float(total_value - total_cost)
+    total_pnl_pct = float(total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+
+    # --- Tổng quan danh mục (FIX lỗi format ở đây) ---
+    st.markdown("### 📊 Tổng quan danh mục")
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric("Vốn gốc (cost)", f"{total_cost:,.0f} VND")
+    with col_b:
+        st.metric("Giá trị hiện tại", f"{total_value:,.0f} VND")
+    with col_c:
+        pnl_color = "green" if total_pnl > 0 else "red" if total_pnl < 0 else "gray"
+        st.markdown(
+            f"""
+            <div style="padding:8px;border-radius:6px;background-color:#F9FAFB;">
+              <div><b>Lãi/Lỗ tổng:</b></div>
+              <div style="color:{pnl_color};font-size:20px;font-weight:bold;">
+                {total_pnl:,.0f} VND ({total_pnl_pct:+.2f}%)
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    # --- Bảng chi tiết từng mã ---
+    st.markdown("### 📋 Chi tiết từng mã trong danh mục")
+
+    df_view = df_port[["symbol", "qty", "buy_price",
+                       "current_price", "cost", "value_now",
+                       "pnl", "pnl_pct"]].copy()
+    df_view = df_view.rename(columns={
+        "symbol": "Mã",
+        "qty": "Số lượng",
+        "buy_price": "Giá mua",
+        "current_price": "Giá hiện tại",
+        "cost": "Vốn (Giá mua × SL)",
+        "value_now": "Giá trị hiện tại",
+        "pnl": "Lãi/Lỗ",
+        "pnl_pct": "Lãi/Lỗ (%)",
+    })
+
+    def style_pnl(val):
+        if pd.isna(val):
+            return ""
+        color = "red" if val < 0 else "green" if val > 0 else "black"
+        return f"color:{color}; font-weight:bold;"
+
+    styler_port = (
+        df_view.style
+        .format({
+            "Số lượng": "{:,.0f}",
+            "Giá mua": "{:,.0f}",
+            "Giá hiện tại": "{:,.0f}",
+            "Vốn (Giá mua × SL)": "{:,.0f}",
+            "Giá trị hiện tại": "{:,.0f}",
+            "Lãi/Lỗ": "{:,.0f}",
+            "Lãi/Lỗ (%)": "{:+.2f}%",
+        })
+        .applymap(style_pnl, subset=["Lãi/Lỗ", "Lãi/Lỗ (%)"])
+    )
+
+    st.dataframe(styler_port, use_container_width=True)
+
+    # --- Nút LƯU danh mục vào file JSON ---
+    if st.button("💾 Lưu danh mục này"):
+        if not new_name:
+            st.error("Bạn cần nhập tên danh mục trước khi lưu.")
+        else:
+            portfolios = st.session_state["portfolios_store"]
+            portfolios[new_name] = (
+                df_port[["symbol", "qty", "buy_price"]]
+                .to_dict(orient="records")
+            )
+            save_portfolios(portfolios)
+            st.session_state["portfolios_store"] = portfolios
+            st.success(f"Đã lưu danh mục **{new_name}**.")
+
+
+
 elif page == "🌍 Dòng tiền khối ngoại":
     st.title("🌍 Dòng tiền khối ngoại – mua / bán, top gom & xả, tỷ trọng giao dịch")
 
