@@ -261,13 +261,6 @@ def load_board_by_exchange(exchange: str = "HOSE"):
     return board
 PORTFOLIO_FILE = "portfolios.json"
 
-def load_all_symbols():
-    """Lấy list tất cả mã cổ phiếu từ Listing (để validate mã)."""
-    listing = Listing(source="VCI")
-    df_sym = listing.symbols_by_exchange()
-    df_sym = df_sym[df_sym["type"] == "STOCK"]
-    return df_sym["symbol"].dropna().unique().tolist()
-
 def load_portfolios():
     """Đọc file JSON lưu danh mục."""
     if not os.path.exists(PORTFOLIO_FILE):
